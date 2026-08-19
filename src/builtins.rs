@@ -9,7 +9,8 @@ const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "echo", "source", ".", "true",
     "false", "type", "read", ":", "wait", "test", "[", "printf", "history", "jobs", "kill",
     "env", "which", "pushd", "popd", "dirs", "eval", "exec", "command", "set", "local", "shift",
-    "readonly", "let", "basename", "dirname", "trap", "umask",
+    "readonly", "let", "basename", "dirname", "trap", "umask", "getopts", "hash", "declare",
+    "typeset", "builtin", "seq", "fg", "bg", "disown",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -86,12 +87,25 @@ pub fn run_builtin(shell: &mut Shell, name: &str, args: &[String]) -> i32 {
         }
         "echo" => {
             let mut newline = true;
+            let mut interpret = false;
             let mut start = 0;
-            if args.first().map(|s| s.as_str()) == Some("-n") {
-                newline = false;
-                start = 1;
+            while let Some(a) = args.get(start) {
+                if a.len() >= 2 && a.starts_with('-') && a[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E')) {
+                    for c in a[1..].chars() {
+                        match c {
+                            'n' => newline = false,
+                            'e' => interpret = true,
+                            'E' => interpret = false,
+                            _ => {}
+                        }
+                    }
+                    start += 1;
+                } else {
+                    break;
+                }
             }
             let out = args[start..].join(" ");
+            let out = if interpret { interpret_escapes(&out) } else { out };
             if newline {
                 println!("{}", out);
             } else {
@@ -455,17 +469,42 @@ pub fn run_builtin(shell: &mut Shell, name: &str, args: &[String]) -> i32 {
             }
             0
         }
-        "read" => {
-            let mut line = String::new();
-            if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
-                return 1;
+        "read" => builtin_read(shell, args),
+        "getopts" => builtin_getopts(shell, args),
+        "hash" => 0,
+        "declare" | "typeset" => builtin_declare(shell, args),
+        "builtin" => {
+            if args.is_empty() {
+                return 0;
             }
-            let line = line.trim_end_matches('\n');
-            if let Some(varname) = args.first() {
-                shell.vars.insert(varname.clone(), line.to_string());
+            if is_builtin(&args[0]) {
+                run_builtin(shell, &args[0], &args[1..])
             } else {
-                shell.vars.insert("REPLY".to_string(), line.to_string());
+                eprintln!("xsh: builtin: {}: not a shell builtin", args[0]);
+                1
             }
+        }
+        "seq" => builtin_seq(args),
+        "fg" => match shell.bg_jobs.pop() {
+            Some(pid) => match waitpid(pid, None) {
+                Ok(WaitStatus::Exited(_, code)) => code,
+                _ => 0,
+            },
+            None => {
+                eprintln!("xsh: fg: no current job");
+                1
+            }
+        },
+        "bg" => {
+            if shell.bg_jobs.is_empty() {
+                eprintln!("xsh: bg: no current job");
+                1
+            } else {
+                0
+            }
+        }
+        "disown" => {
+            shell.bg_jobs.clear();
             0
         }
         _ => {
@@ -497,6 +536,219 @@ fn builtin_cd(shell: &mut Shell, args: &[String]) -> i32 {
             eprintln!("xsh: cd: {}: {}", target, e);
             1
         }
+    }
+}
+
+fn interpret_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('a') => out.push('\u{7}'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn builtin_read(shell: &mut Shell, args: &[String]) -> i32 {
+    let mut prompt: Option<String> = None;
+    let mut silent = false;
+    let mut varname: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-p" => {
+                i += 1;
+                prompt = args.get(i).cloned();
+                i += 1;
+            }
+            "-s" => {
+                silent = true;
+                i += 1;
+            }
+            other => {
+                varname = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    if let Some(p) = &prompt {
+        print!("{}", p);
+        let _ = std::io::stdout().flush();
+    }
+
+    let orig_termios = if silent {
+        use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg};
+        match tcgetattr(std::io::stdin()) {
+            Ok(t) => {
+                let mut raw = t.clone();
+                raw.local_flags.remove(LocalFlags::ECHO);
+                let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, &raw);
+                Some(t)
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line).unwrap_or(0);
+
+    if let Some(t) = orig_termios {
+        use nix::sys::termios::{tcsetattr, SetArg};
+        let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, &t);
+        println!();
+    }
+
+    if n == 0 {
+        return 1;
+    }
+    let line = line.trim_end_matches('\n');
+    shell
+        .vars
+        .insert(varname.unwrap_or_else(|| "REPLY".to_string()), line.to_string());
+    0
+}
+
+fn builtin_getopts(shell: &mut Shell, args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("xsh: getopts: usage: getopts optstring name [arg...]");
+        return 2;
+    }
+    let optstring = &args[0];
+    let name = &args[1];
+    let extra = &args[2..];
+    let positional: Vec<String> = if !extra.is_empty() {
+        extra.to_vec()
+    } else {
+        let count: usize = shell.get_var("#").and_then(|s| s.parse().ok()).unwrap_or(0);
+        (1..=count)
+            .filter_map(|i| shell.vars.get(&i.to_string()).cloned())
+            .collect()
+    };
+    let optind: usize = shell.get_var("OPTIND").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let idx = optind.saturating_sub(1);
+
+    if idx >= positional.len() {
+        shell.vars.insert(name.clone(), "?".to_string());
+        return 1;
+    }
+    let cur = &positional[idx];
+    if !cur.starts_with('-') || cur == "--" || cur.len() < 2 {
+        shell.vars.insert(name.clone(), "?".to_string());
+        return 1;
+    }
+    let opt_char = cur.chars().nth(1).unwrap_or('?');
+    if !optstring.contains(opt_char) {
+        shell.vars.insert(name.clone(), "?".to_string());
+        shell.vars.insert("OPTIND".to_string(), (optind + 1).to_string());
+        return 0;
+    }
+    let needs_arg = optstring
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w[0] == opt_char && w[1] == ':');
+    shell.vars.insert(name.clone(), opt_char.to_string());
+    if needs_arg {
+        if idx + 1 < positional.len() {
+            shell.vars.insert("OPTARG".to_string(), positional[idx + 1].clone());
+            shell.vars.insert("OPTIND".to_string(), (optind + 2).to_string());
+        } else {
+            eprintln!("xsh: getopts: option requires an argument -- '{}'", opt_char);
+            shell.vars.insert("OPTIND".to_string(), (optind + 1).to_string());
+        }
+    } else {
+        shell.vars.insert("OPTIND".to_string(), (optind + 1).to_string());
+    }
+    0
+}
+
+fn builtin_declare(shell: &mut Shell, args: &[String]) -> i32 {
+    let mut do_export = false;
+    let mut do_readonly = false;
+    let mut rest = Vec::new();
+    for a in args {
+        if let Some(flags) = a.strip_prefix('-') {
+            if flags.contains('x') {
+                do_export = true;
+            }
+            if flags.contains('r') {
+                do_readonly = true;
+            }
+            if !flags.is_empty() {
+                continue;
+            }
+        }
+        rest.push(a.clone());
+    }
+    for a in rest {
+        let (k, v) = match a.split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (a.clone(), None),
+        };
+        if let Some(v) = v {
+            shell.vars.insert(k.clone(), v);
+        }
+        if do_export {
+            shell.exported.insert(k.clone());
+        }
+        if do_readonly {
+            shell.readonly.insert(k.clone());
+        }
+    }
+    0
+}
+
+fn builtin_seq(args: &[String]) -> i32 {
+    let nums: Vec<f64> = args.iter().filter_map(|a| a.parse().ok()).collect();
+    let (start, step, end) = match nums.len() {
+        1 => (1.0, 1.0, nums[0]),
+        2 => (nums[0], 1.0, nums[1]),
+        3 => (nums[0], nums[1], nums[2]),
+        _ => {
+            eprintln!("xsh: seq: usage: seq [first [incr]] last");
+            return 1;
+        }
+    };
+    if step == 0.0 {
+        eprintln!("xsh: seq: zero increment");
+        return 1;
+    }
+    let mut v = start;
+    if step > 0.0 {
+        while v <= end {
+            print_seq_num(v);
+            v += step;
+        }
+    } else {
+        while v >= end {
+            print_seq_num(v);
+            v += step;
+        }
+    }
+    0
+}
+
+fn print_seq_num(v: f64) {
+    if v.fract() == 0.0 {
+        println!("{}", v as i64);
+    } else {
+        println!("{}", v);
     }
 }
 
