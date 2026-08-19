@@ -1,0 +1,9 @@
+[package]
+name = "xsh"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs = "6.0.0"
+nix = { version = "0.31.3", features = ["process", "fs", "signal", "term"] }
+rustyline = "18.0.1"
