@@ -98,7 +98,16 @@ impl Shell {
                 return 2;
             }
         };
-        self.run_list(&prog);
+        for n in &prog {
+            if self.should_exit.is_some() {
+                break;
+            }
+            self.run_node(n);
+            if self.errexit && self.last_status != 0 {
+                self.should_exit = Some(self.last_status);
+                break;
+            }
+        }
         self.last_status
     }
 
@@ -310,6 +319,9 @@ impl Shell {
             if argv.is_empty() {
                 0
             } else {
+                if self.xtrace {
+                    eprintln!("+ {}", argv.join(" "));
+                }
                 self.run_command(&argv, &sc.redirects)
             }
         };
@@ -394,7 +406,7 @@ impl Shell {
         self.exec_external(argv, redirects)
     }
 
-    fn exec_external(&mut self, argv: &[String], redirects: &[Redirect]) -> i32 {
+    pub(crate) fn exec_external(&mut self, argv: &[String], redirects: &[Redirect]) -> i32 {
         match unsafe { fork() } {
             Ok(ForkResult::Child) => {
                 if let Err(e) = self.apply_redirects_in_child(redirects) {
@@ -685,7 +697,7 @@ impl Shell {
     }
 }
 
-fn exec_and_replace(shell: &mut Shell, argv: &[String]) -> ! {
+pub(crate) fn exec_and_replace(shell: &mut Shell, argv: &[String]) -> ! {
     let cname = match CString::new(argv[0].as_str()) {
         Ok(c) => c,
         Err(_) => std::process::exit(127),

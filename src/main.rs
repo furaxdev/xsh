@@ -4,7 +4,9 @@ mod builtins;
 mod exec;
 mod lexer;
 mod parser;
+mod rc_import;
 mod state;
+mod test_cmd;
 
 use lexer::Lexer;
 use rustyline::error::ReadlineError;
@@ -71,11 +73,52 @@ fn try_parse(src: &str) -> Result<Vec<ast::Node>, String> {
     parser::parse(tokens)
 }
 
+const DEFAULT_XSHRC: &str = "\
+# ~/.xshrc — loaded at the start of every xsh session.
+# Xsh also best-effort imports exported variables and aliases from
+# ~/.bashrc and ~/.zshrc (if bash/zsh are installed) before this file
+# runs, so anything you set below takes priority over those.
+
+alias ll='ls -la'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias grep='grep --color=auto'
+
+mkcd() {
+  mkdir -p \"$1\" && cd \"$1\"
+}
+
+PS1=\"\x1b[36mxsh\x1b[0m:\x1b[32m$PWD\x1b[0m$ \"
+";
+
+const RC_BLACKLIST: &[&str] = &[
+    "SHLVL", "_", "PWD", "OLDPWD", "SHELL", "0", "PS1", "PS2", "PS3", "PS4", "IFS",
+];
+
 fn main() {
     let mut shell = Shell::new();
 
+    for (bin, rc) in [("bash", ".bashrc"), ("zsh", ".zshrc")] {
+        if let Some(imported) = rc_import::import(bin, rc) {
+            for (k, v) in imported.vars {
+                if !RC_BLACKLIST.contains(&k.as_str()) {
+                    shell.vars.insert(k.clone(), v);
+                    shell.exported.insert(k);
+                }
+            }
+            for (k, v) in imported.aliases {
+                shell.aliases.entry(k).or_insert(v);
+            }
+        }
+    }
+
     let rc_path = dirs::home_dir().map(|h| h.join(".xshrc"));
     if let Some(path) = &rc_path {
+        if !path.exists() {
+            let _ = std::fs::write(path, DEFAULT_XSHRC);
+        }
         if let Ok(src) = std::fs::read_to_string(path) {
             shell.run_source(&src);
         }
@@ -154,6 +197,7 @@ fn main() {
         if let Some(src) = line {
             if !src.trim().is_empty() {
                 let _ = rl.add_history_entry(src.as_str());
+                shell.history.push(src.clone());
                 shell.run_source(&src);
             }
         }

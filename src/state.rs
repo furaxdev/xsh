@@ -11,6 +11,10 @@ pub struct Shell {
     pub shell_name: String,
     pub should_exit: Option<i32>,
     pub bg_jobs: Vec<Pid>,
+    pub history: Vec<String>,
+    pub dir_stack: Vec<String>,
+    pub errexit: bool,
+    pub xtrace: bool,
 }
 
 impl Shell {
@@ -39,6 +43,10 @@ impl Shell {
             shell_name: "xsh".to_string(),
             should_exit: None,
             bg_jobs: Vec::new(),
+            history: Vec::new(),
+            dir_stack: Vec::new(),
+            errexit: false,
+            xtrace: false,
         }
     }
 
