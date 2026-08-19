@@ -8,7 +8,7 @@ pub struct Parser {
 
 const KEYWORDS: &[&str] = &[
     "if", "then", "elif", "else", "fi", "for", "in", "do", "done", "while", "until", "function",
-    "return", "break", "continue",
+    "return", "break", "continue", "case", "esac", "time",
 ];
 
 fn is_valid_ident(s: &str) -> bool {
@@ -170,6 +170,12 @@ impl Parser {
     }
 
     fn parse_pipeline(&mut self) -> Result<Node, String> {
+        let timed = if self.kw().as_deref() == Some("time") {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let negate = if matches!(self.peek(), Token::Bang) {
             self.advance();
             true
@@ -182,17 +188,19 @@ impl Parser {
             self.skip_newlines();
             cmds.push(self.parse_command()?);
         }
-        if cmds.len() == 1 && !negate {
-            Ok(cmds.pop().unwrap())
+        let node = if cmds.len() == 1 && !negate {
+            cmds.pop().unwrap()
         } else {
-            Ok(Node::Pipeline(cmds, negate))
-        }
+            Node::Pipeline(cmds, negate)
+        };
+        Ok(if timed { Node::Timed(Box::new(node)) } else { node })
     }
 
     fn parse_command(&mut self) -> Result<Node, String> {
         match self.kw().as_deref() {
             Some("if") => self.parse_if(),
             Some("for") => self.parse_for(),
+            Some("case") => self.parse_case(),
             Some("while") => self.parse_while(false),
             Some("until") => self.parse_while(true),
             Some("function") => self.parse_function_kw(),
@@ -295,6 +303,78 @@ impl Parser {
         let body = self.parse_stmt_list(&["done"])?;
         self.expect_kw("done")?;
         Ok(Node::For { var, words, body })
+    }
+
+    fn parse_case(&mut self) -> Result<Node, String> {
+        self.advance(); // case
+        let word = self.expect_word()?;
+        self.skip_newlines();
+        self.expect_kw("in")?;
+        self.skip_newlines();
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            while matches!(self.peek(), Token::Semi) {
+                self.advance();
+                self.skip_newlines();
+            }
+            if self.kw().as_deref() == Some("esac") {
+                self.advance();
+                break;
+            }
+            if self.at_eof() {
+                return Err("xsh: syntax error: expected 'esac'".into());
+            }
+            if matches!(self.peek(), Token::LParen) {
+                self.advance();
+            }
+            let mut patterns = vec![self.expect_word()?];
+            while matches!(self.peek(), Token::Pipe) {
+                self.advance();
+                patterns.push(self.expect_word()?);
+            }
+            if !matches!(self.peek(), Token::RParen) {
+                return Err("xsh: syntax error: expected ')' in case pattern".into());
+            }
+            self.advance();
+            self.skip_newlines();
+            let body = self.parse_case_arm_body()?;
+            if matches!(self.peek(), Token::DSemi) {
+                self.advance();
+            }
+            arms.push((patterns, body));
+        }
+        Ok(Node::Case { word, arms })
+    }
+
+    fn parse_case_arm_body(&mut self) -> Result<Vec<Node>, String> {
+        let mut nodes = Vec::new();
+        loop {
+            self.skip_newlines();
+            while matches!(self.peek(), Token::Semi) {
+                self.advance();
+                self.skip_newlines();
+            }
+            if self.at_eof() || matches!(self.peek(), Token::DSemi) {
+                break;
+            }
+            if self.kw().as_deref() == Some("esac") {
+                break;
+            }
+            let mut node = self.parse_and_or()?;
+            if matches!(self.peek(), Token::Amp) {
+                self.advance();
+                node = Node::Background(Box::new(node));
+            }
+            nodes.push(node);
+            match self.peek() {
+                Token::Semi | Token::Newline => {
+                    self.advance();
+                }
+                _ => {}
+            }
+        }
+        Ok(nodes)
     }
 
     fn parse_while(&mut self, until: bool) -> Result<Node, String> {

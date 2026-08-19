@@ -7,6 +7,7 @@ pub enum Token {
     AndIf,      // &&
     OrIf,       // ||
     Semi,       // ;
+    DSemi,      // ;;
     Amp,        // &
     Newline,
     LBrace, // {
@@ -72,7 +73,12 @@ impl<'a> Lexer<'a> {
                 }
                 Some(';') => {
                     self.chars.next();
-                    tokens.push(Token::Semi);
+                    if self.chars.peek() == Some(&';') {
+                        self.chars.next();
+                        tokens.push(Token::DSemi);
+                    } else {
+                        tokens.push(Token::Semi);
+                    }
                 }
                 Some('{') => {
                     self.chars.next();

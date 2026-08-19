@@ -15,6 +15,9 @@ pub struct Shell {
     pub dir_stack: Vec<String>,
     pub errexit: bool,
     pub xtrace: bool,
+    pub readonly: HashSet<String>,
+    pub local_stack: Vec<Vec<(String, Option<String>)>>,
+    pub trap_exit: Option<String>,
 }
 
 impl Shell {
@@ -47,6 +50,9 @@ impl Shell {
             dir_stack: Vec::new(),
             errexit: false,
             xtrace: false,
+            readonly: HashSet::new(),
+            local_stack: Vec::new(),
+            trap_exit: None,
         }
     }
 

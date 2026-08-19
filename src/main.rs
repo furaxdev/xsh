@@ -2,6 +2,7 @@ mod arith;
 mod ast;
 mod builtins;
 mod exec;
+mod glob;
 mod lexer;
 mod parser;
 mod rc_import;
@@ -130,6 +131,7 @@ fn main() {
         match std::fs::read_to_string(script) {
             Ok(src) => {
                 let status = shell.run_source(&src);
+                shell.run_exit_trap();
                 std::process::exit(shell.should_exit.unwrap_or(status));
             }
             Err(e) => {
@@ -147,6 +149,7 @@ fn main() {
 
     loop {
         if let Some(code) = shell.should_exit {
+            shell.run_exit_trap();
             if let Some(path) = &history_path {
                 let _ = rl.save_history(path);
             }
@@ -179,6 +182,7 @@ fn main() {
                     break None;
                 }
                 Err(ReadlineError::Eof) => {
+                    shell.run_exit_trap();
                     if let Some(path) = &history_path {
                         let _ = rl.save_history(path);
                     }

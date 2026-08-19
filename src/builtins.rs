@@ -8,7 +8,8 @@ use std::io::Write;
 const BUILTINS: &[&str] = &[
     "cd", "pwd", "exit", "export", "unset", "alias", "unalias", "echo", "source", ".", "true",
     "false", "type", "read", ":", "wait", "test", "[", "printf", "history", "jobs", "kill",
-    "env", "which", "pushd", "popd", "dirs", "eval", "exec", "command", "set",
+    "env", "which", "pushd", "popd", "dirs", "eval", "exec", "command", "set", "local", "shift",
+    "readonly", "let", "basename", "dirname", "trap", "umask",
 ];
 
 pub fn is_builtin(name: &str) -> bool {
@@ -49,6 +50,10 @@ pub fn run_builtin(shell: &mut Shell, name: &str, args: &[String]) -> i32 {
         }
         "unset" => {
             for a in args {
+                if shell.readonly.contains(a) {
+                    eprintln!("xsh: unset: {}: readonly variable", a);
+                    return 1;
+                }
                 shell.vars.remove(a);
                 shell.exported.remove(a);
                 shell.functions.remove(a);
@@ -134,6 +139,181 @@ pub fn run_builtin(shell: &mut Shell, name: &str, args: &[String]) -> i32 {
                 }
             }
             status
+        }
+        "local" => {
+            let mut status = 0;
+            for a in args {
+                match a.split_once('=') {
+                    Some((k, v)) => {
+                        status |= shell.declare_local(k, Some(v.to_string()));
+                    }
+                    None => {
+                        status |= shell.declare_local(a, None);
+                    }
+                }
+            }
+            status
+        }
+        "shift" => {
+            let n: usize = args.first().and_then(|a| a.parse().ok()).unwrap_or(1);
+            let count: usize = shell.get_var("#").and_then(|s| s.parse().ok()).unwrap_or(0);
+            if n > count {
+                return 1;
+            }
+            for i in 1..=(count - n) {
+                match shell.vars.get(&(i + n).to_string()).cloned() {
+                    Some(v) => {
+                        shell.vars.insert(i.to_string(), v);
+                    }
+                    None => {
+                        shell.vars.remove(&i.to_string());
+                    }
+                }
+            }
+            for i in (count - n + 1)..=count {
+                shell.vars.remove(&i.to_string());
+            }
+            let new_count = count - n;
+            let joined: Vec<String> = (1..=new_count)
+                .filter_map(|i| shell.vars.get(&i.to_string()).cloned())
+                .collect();
+            shell.vars.insert("@".to_string(), joined.join(" "));
+            shell.vars.insert("#".to_string(), new_count.to_string());
+            0
+        }
+        "readonly" => {
+            if args.is_empty() {
+                let mut names: Vec<_> = shell.readonly.iter().cloned().collect();
+                names.sort();
+                for k in names {
+                    println!("readonly {}={}", k, shell.vars.get(&k).cloned().unwrap_or_default());
+                }
+                return 0;
+            }
+            for a in args {
+                if let Some((k, v)) = a.split_once('=') {
+                    shell.vars.insert(k.to_string(), v.to_string());
+                    shell.readonly.insert(k.to_string());
+                } else {
+                    shell.readonly.insert(a.clone());
+                }
+            }
+            0
+        }
+        "let" => {
+            if args.is_empty() {
+                return 1;
+            }
+            let mut last = 0i64;
+            for a in args {
+                let result = if let Some((k, expr)) = a.split_once('=') {
+                    let k = k.trim();
+                    if shell.readonly.contains(k) {
+                        eprintln!("xsh: {}: readonly variable", k);
+                        return 1;
+                    }
+                    match crate::arith::eval(expr, &shell.vars) {
+                        Ok(v) => {
+                            shell.vars.insert(k.to_string(), v.to_string());
+                            v
+                        }
+                        Err(e) => {
+                            eprintln!("xsh: let: {}", e);
+                            return 1;
+                        }
+                    }
+                } else {
+                    match crate::arith::eval(a, &shell.vars) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("xsh: let: {}", e);
+                            return 1;
+                        }
+                    }
+                };
+                last = result;
+            }
+            if last != 0 {
+                0
+            } else {
+                1
+            }
+        }
+        "basename" => {
+            let Some(path) = args.first() else {
+                eprintln!("xsh: basename: missing operand");
+                return 1;
+            };
+            let mut name = std::path::Path::new(path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            if let Some(suffix) = args.get(1) {
+                if name.ends_with(suffix.as_str()) && name != *suffix {
+                    name.truncate(name.len() - suffix.len());
+                }
+            }
+            println!("{}", name);
+            0
+        }
+        "dirname" => {
+            let Some(path) = args.first() else {
+                eprintln!("xsh: dirname: missing operand");
+                return 1;
+            };
+            let dir = std::path::Path::new(path)
+                .parent()
+                .map(|p| {
+                    let s = p.to_string_lossy().to_string();
+                    if s.is_empty() {
+                        ".".to_string()
+                    } else {
+                        s
+                    }
+                })
+                .unwrap_or_else(|| ".".to_string());
+            println!("{}", dir);
+            0
+        }
+        "trap" => {
+            if args.is_empty() {
+                if let Some(cmd) = &shell.trap_exit {
+                    println!("trap -- '{}' EXIT", cmd);
+                }
+                return 0;
+            }
+            if args[0] == "-" {
+                shell.trap_exit = None;
+                return 0;
+            }
+            if args.len() >= 2 && args[1] == "EXIT" {
+                shell.trap_exit = Some(args[0].clone());
+                0
+            } else {
+                eprintln!("xsh: trap: only the EXIT signal is supported");
+                1
+            }
+        }
+        "umask" => {
+            match args.first() {
+                None => {
+                    let cur = nix::sys::stat::umask(nix::sys::stat::Mode::empty());
+                    nix::sys::stat::umask(cur);
+                    println!("{:04o}", cur.bits());
+                }
+                Some(m) => match u32::from_str_radix(m, 8) {
+                    Ok(bits) => {
+                        if let Some(mode) = nix::sys::stat::Mode::from_bits(bits) {
+                            nix::sys::stat::umask(mode);
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("xsh: umask: {}: invalid mode", m);
+                        return 1;
+                    }
+                },
+            }
+            0
         }
         "test" => test_cmd::run(args),
         "[" => {

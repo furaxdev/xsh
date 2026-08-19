@@ -61,6 +61,11 @@ pub enum Node {
     Return(Option<Word>),
     Break,
     Continue,
+    Case {
+        word: Word,
+        arms: Vec<(Vec<Word>, Vec<Node>)>,
+    },
+    Timed(Box<Node>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -234,6 +234,40 @@ impl Shell {
             }
             Node::Break => Flow::Break,
             Node::Continue => Flow::Continue,
+            Node::Case { word, arms } => {
+                let subject = match self.expand_word(word) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("xsh: {}", e);
+                        self.last_status = 1;
+                        return Flow::Normal;
+                    }
+                };
+                for (patterns, body) in arms {
+                    for p in patterns {
+                        let pat = match self.expand_word(p) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("xsh: {}", e);
+                                self.last_status = 1;
+                                return Flow::Normal;
+                            }
+                        };
+                        if crate::glob::matches(&pat, &subject) {
+                            return self.run_list(body);
+                        }
+                    }
+                }
+                self.last_status = 0;
+                Flow::Normal
+            }
+            Node::Timed(inner) => {
+                let start = std::time::Instant::now();
+                let flow = self.run_node(inner);
+                let elapsed = start.elapsed();
+                eprintln!("real\t{:.3}s", elapsed.as_secs_f64());
+                flow
+            }
         }
     }
 
@@ -262,25 +296,75 @@ impl Shell {
     }
 
     pub fn call_function(&mut self, body: &[Node], args: &[String]) -> i32 {
-        let saved_positional = self.vars.get("@").cloned();
+        let mut frame: Vec<(String, Option<String>)> = Vec::new();
+        for name in ["@", "#"]
+            .into_iter()
+            .map(String::from)
+            .chain((1..=9).map(|i: usize| i.to_string()))
+        {
+            frame.push((name.clone(), self.vars.get(&name).cloned()));
+        }
         for (i, a) in args.iter().enumerate() {
             self.vars.insert((i + 1).to_string(), a.clone());
         }
         self.vars.insert("@".to_string(), args.join(" "));
         self.vars.insert("#".to_string(), args.len().to_string());
+
+        self.local_stack.push(frame);
         let flow = self.run_list(body);
-        if let Some(p) = saved_positional {
-            self.vars.insert("@".to_string(), p);
+        let frame = self.local_stack.pop().unwrap_or_default();
+        for (name, old) in frame {
+            match old {
+                Some(v) => {
+                    self.vars.insert(name, v);
+                }
+                None => {
+                    self.vars.remove(&name);
+                }
+            }
         }
+
         match flow {
             Flow::Return(code) => code,
             _ => self.last_status,
         }
     }
 
+    pub fn declare_local(&mut self, name: &str, value: Option<String>) -> i32 {
+        if self.local_stack.is_empty() {
+            eprintln!("xsh: local: can only be used inside a function");
+            return 1;
+        }
+        let already_recorded = self
+            .local_stack
+            .last()
+            .unwrap()
+            .iter()
+            .any(|(n, _)| n == name);
+        if !already_recorded {
+            let prev = self.vars.get(name).cloned();
+            self.local_stack
+                .last_mut()
+                .unwrap()
+                .push((name.to_string(), prev));
+        }
+        self.vars.insert(name.to_string(), value.unwrap_or_default());
+        0
+    }
+
+    pub fn run_exit_trap(&mut self) {
+        if let Some(cmd) = self.trap_exit.take() {
+            self.run_source(&cmd);
+        }
+    }
+
     fn run_simple(&mut self, sc: &SimpleCommand) -> i32 {
         let mut saved: Vec<(String, Option<String>)> = Vec::new();
         for (name, word) in &sc.assignments {
+            if self.readonly.contains(name) {
+                eprintln!("xsh: {}: readonly variable", name);
+                return 1;
+            }
             let val = match self.expand_word(word) {
                 Ok(v) => v,
                 Err(e) => {
