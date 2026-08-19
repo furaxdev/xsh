@@ -251,6 +251,15 @@ impl<'a> Lexer<'a> {
             };
         }
 
+        if self.chars.peek() == Some(&'~') {
+            let mut probe = self.chars.clone();
+            probe.next();
+            if matches!(probe.peek(), None | Some('/')) {
+                self.chars.next();
+                parts.push(WordPart::Var("HOME".to_string()));
+            }
+        }
+
         loop {
             match self.chars.peek() {
                 None => break,
