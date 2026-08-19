@@ -516,19 +516,38 @@ pub fn run_builtin(shell: &mut Shell, name: &str, args: &[String]) -> i32 {
 
 fn builtin_cd(shell: &mut Shell, args: &[String]) -> i32 {
     let target = if let Some(t) = args.first() {
-        t.clone()
+        if t == "-" {
+            match shell.get_var("OLDPWD") {
+                Some(p) => p,
+                None => {
+                    eprintln!("xsh: cd: OLDPWD not set");
+                    return 1;
+                }
+            }
+        } else {
+            t.clone()
+        }
     } else if let Some(home) = shell.get_var("HOME") {
         home
     } else {
         eprintln!("xsh: cd: HOME not set");
         return 1;
     };
+    let prev = std::env::current_dir().ok();
     match std::env::set_current_dir(&target) {
         Ok(_) => {
+            if let Some(prev) = prev {
+                let s = prev.to_string_lossy().to_string();
+                shell.vars.insert("OLDPWD".to_string(), s);
+                shell.exported.insert("OLDPWD".to_string());
+            }
             if let Ok(cwd) = std::env::current_dir() {
                 let s = cwd.to_string_lossy().to_string();
                 shell.vars.insert("PWD".to_string(), s.clone());
                 shell.exported.insert("PWD".to_string());
+                if args.first().map(|a| a == "-").unwrap_or(false) {
+                    println!("{}", s);
+                }
             }
             0
         }
